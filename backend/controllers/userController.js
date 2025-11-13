@@ -1,35 +1,37 @@
-const asyncHandler = require("express-async-handler");
-const User = require("../models/userModel");
 const UpdatedMonth = require("../models/updatedWorkoutModel");
 const Exercise = require("../models/exerciseModel");
 const { getEstTime } = require("../utils/date");
-
-const { generateRandomPassword } = require("../utils/randomPasswordGenerator");
 const { default: mongoose } = require("mongoose");
-const { getAuth, createUserWithEmailAndPassword, sendPasswordResetEmail } = require("firebase/auth");
+const asyncHandler = require("express-async-handler");
+const User = require("../models/userModel");
+const { generateRandomPassword } = require("../utils/randomPasswordGenerator");
+const { auth } = require("../firebase.js");
+const {
+  createUserWithEmailAndPassword,
+  sendPasswordResetEmail,
+} = require("firebase/auth");
 
-exports.registerUser = asyncHandler(async (req, res, next) => {
+const mailer = require("../utils/email.js");
+
+exports.registerUser = asyncHandler(async (req, res) => {
   const { email, username } = req.body;
-  let newUserObject = {};
-  let credentials;
 
   if (!email) {
     res.status(400);
     throw new Error("Please add email");
   }
 
-  const auth = getAuth();
-
-  //check if user exists
-  const userExists = await User.findOne({ email });
-
+  // Check if user exists in MongoDB
+  const userExists = await User.findOne({ email: email });
   if (userExists) {
+    res.status(400).json({ users: userExists });
     res.status(400);
+
     throw new Error("A user with that email already exists");
   }
 
-  newUserObject = {
-    ...newUserObject,
+  // Prepare new user object
+  const newUserObject = {
     email,
     username,
     experience: "",
@@ -42,62 +44,57 @@ exports.registerUser = asyncHandler(async (req, res, next) => {
   };
 
   try {
-    const randomPassword = generateRandomPassword().toString();
-    console.log(">>>>>", randomPassword);
-    credentials = await createUserWithEmailAndPassword(
-      auth,
-      email,
-      randomPassword
-    );
+    const randomPassword = generateRandomPassword();
+    console.log("Generated password:", randomPassword);
 
-    sendPasswordResetEmail(auth, email);
+    // Create Firebase user
+    await createUserWithEmailAndPassword(auth, email, randomPassword);
+
+    // Send password reset email
+    await sendPasswordResetEmail(auth, email);
+
+    // Save user in MongoDB
+    const user = await User.create(newUserObject);
+
+    res.status(200).json({ message: "User registered", user });
+    console.log("User registration success");
+    let generated_otp = mailer.generateOTP();
+    mailer
+      .sendMail(email, username , generated_otp)
+      .then((info) => console.log("Email sent:", info.response))
+      .catch((error) => console.error("Error sending email:", error));
+
   } catch (error) {
     res.status(500);
     throw new Error(`Error creating user: ${error.message}`);
-  }
-
-  let user = await User.create(newUserObject);
-
-  try {
-    user = await user.save();
-  } catch (error) {
-    console.log(error);
-  }
-
-  if (user) {
-    res.status(200).json({ message: "User registered" });
-  } else {
-    res.status(500);
-    throw new Error("Invalid user data");
   }
 });
 
 exports.getUser = asyncHandler(async (req, res, next) => {
   try {
-    const user = await User.findOne({_id: req.params.id});
+    const user = await User.findOne({ _id: req.params.id });
     const userWorkout = await getWorkoutForCurrentMonthHistory(user.uid);
     user.workout = userWorkout;
-    const userResponse = {  
-      _id: user._id,  
-      email: user.email,  
-      uid: user.uid,  
-      role: user.role,  
-      experience: user.experience,  
-      level: user.level,  
-      note: user.note,  
-      avatarUrl: user.avatarUrl,  
-      favorites: user.favorites,  
-      createdAt: user.createdAt,  
-      updatedAt: user.updatedAt,  
-      __v: user.__v,  
-      name: user.name,  
-      workoutsHistory: user.workoutsHistory,  
-      dayHistory: user.dayHistory,  
-      workout: userWorkout 
-    }
+    const userResponse = {
+      _id: user._id,
+      email: user.email,
+      uid: user.uid,
+      role: user.role,
+      experience: user.experience,
+      level: user.level,
+      note: user.note,
+      avatarUrl: user.avatarUrl,
+      favorites: user.favorites,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+      __v: user.__v,
+      name: user.name,
+      workoutsHistory: user.workoutsHistory,
+      dayHistory: user.dayHistory,
+      workout: userWorkout,
+    };
     console.log(userResponse);
     res.status(200).json(userResponse);
-
   } catch (error) {
     console.log(error);
   }
@@ -110,14 +107,14 @@ const getWorkoutForCurrentMonthHistory = async (id) => {
       uid: id,
       $and: [
         { $or: [{ startDate: { $lte: estNow } }, { startDate: null }] },
-        { $or: [{ endDate: { $gte: estNow } }, { endDate: null }] }
-      ]
+        { $or: [{ endDate: { $gte: estNow } }, { endDate: null }] },
+      ],
     });
 
     if (!workout) {
       return false;
     }
-  
+
     let exerciseIds = [];
     workout.weeks.forEach((week) => {
       week.days.forEach((day) => {
@@ -150,14 +147,13 @@ const getWorkoutForCurrentMonthHistory = async (id) => {
     });
 
     return workout;
-  }
-  catch (error) {
-    console.error('Error updating workouts:', error);
+  } catch (error) {
+    console.error("Error updating workouts:", error);
   }
 };
 exports.getUsers = asyncHandler(async (req, res, next) => {
   try {
-    const { search, page = 1, perPage = 10, sortBy} = req.query;
+    const { search, page = 1, perPage = 10, sortBy } = req.query;
 
     const pipeline = [];
 
@@ -201,7 +197,7 @@ exports.getUsers = asyncHandler(async (req, res, next) => {
       },
     };
     pipeline.push(facet);
-    
+
     const results = await User.aggregate(pipeline);
 
     var users = [];
@@ -210,9 +206,9 @@ exports.getUsers = asyncHandler(async (req, res, next) => {
     if (results.length != 0) {
       users = results[0].pipelineUsers;
 
-    //   if (results[0].totalCount.length != 0)
-    //     count = results[0].totalCount[0].totalMatchingDocuments;
-    // }
+      //   if (results[0].totalCount.length != 0)
+      //     count = results[0].totalCount[0].totalMatchingDocuments;
+      // }
     }
     res.status(200).json({ users: users });
   } catch (error) {
@@ -223,12 +219,12 @@ exports.getUsers = asyncHandler(async (req, res, next) => {
 exports.updateUser = asyncHandler(async (req, res, next) => {
   try {
     const { detail, deviceToken } = req.body;
-    console.log({detail});
+    console.log({ detail });
     await User.findOneAndUpdate(
       { _id: req.params.id },
       {
         detail,
-        $push: { deviceTokens: deviceToken }
+        $push: { deviceTokens: deviceToken },
       },
       { new: true }
     )
@@ -280,8 +276,8 @@ exports.signInAdmin = asyncHandler(async (req, res, next) => {
 
 exports.getMe = asyncHandler(async (req, res, next) => {
   try {
-    console.log('get_user', req);
-    console.log('get_user/user', req.user);
+    console.log("get_user", req);
+    console.log("get_user/user", req.user);
 
     const user = req.user;
     res.status(200).json(user);
@@ -292,28 +288,40 @@ exports.getMe = asyncHandler(async (req, res, next) => {
 
 exports.exerciseDone = asyncHandler(async (req, res, next) => {
   try {
-    const { monthIndex, weekIndex, dayId, exerciseId, sets, reps, weight, rest } = req.body;
+    const {
+      monthIndex,
+      weekIndex,
+      dayId,
+      exerciseId,
+      sets,
+      reps,
+      weight,
+      rest,
+    } = req.body;
     const user = req.user;
 
     if (!user.workoutsHistory) user.workoutsHistory = new Array();
 
     user.workoutsHistory.push({
-      monthIndex : monthIndex,
-      weekIndex : weekIndex,
-      dayId : new mongoose.Types.ObjectId(dayId),
-      exerciseId : new mongoose.Types.ObjectId(exerciseId),
+      monthIndex: monthIndex,
+      weekIndex: weekIndex,
+      dayId: new mongoose.Types.ObjectId(dayId),
+      exerciseId: new mongoose.Types.ObjectId(exerciseId),
       sets: sets,
       reps: reps,
       weight: weight,
       rest: rest,
-    })
-    await user.save().then((result) => {
-      console.log("history saved successfully:", result);
-      res.status(200).json({ result: true });
-    }).catch((error) => {
-      console.error("Error occurs while saving history:", error);
-      res.status(200).json({ result: false, message: error });
     });
+    await user
+      .save()
+      .then((result) => {
+        console.log("history saved successfully:", result);
+        res.status(200).json({ result: true });
+      })
+      .catch((error) => {
+        console.error("Error occurs while saving history:", error);
+        res.status(200).json({ result: false, message: error });
+      });
   } catch (error) {
     console.log(error);
   }
@@ -350,11 +358,14 @@ exports.exerciseDone = asyncHandler(async (req, res, next) => {
 // });
 exports.dayDone = asyncHandler(async (req, res, next) => {
   try {
-    const { monthIndex, weekIndex, daySplit, dayIndex, state, streak } = req.body;
+    const { monthIndex, weekIndex, daySplit, dayIndex, state, streak } =
+      req.body;
     const user = req.user;
 
     if (!user) {
-      return res.status(401).json({ result: false, message: "User not authenticated" });
+      return res
+        .status(401)
+        .json({ result: false, message: "User not authenticated" });
     }
 
     if (!user.dayHistory) user.dayHistory = [];
@@ -369,7 +380,9 @@ exports.dayDone = asyncHandler(async (req, res, next) => {
     );
 
     if (existingEntry) {
-      return res.status(400).json({ result: false, message: "Entry already exists" });
+      return res
+        .status(400)
+        .json({ result: false, message: "Entry already exists" });
     }
 
     // Add a new entry
@@ -383,52 +396,62 @@ exports.dayDone = asyncHandler(async (req, res, next) => {
     });
 
     // Save to database
-    await user.save().then((result) => {
-      console.log("History saved successfully:", result);
-      res.status(200).json({ result: true });
-    }).catch((error) => {
-      console.error("Error occurs while saving history:", error);
-      res.status(500).json({ result: false, message: "Database save error", error });
-    });
+    await user
+      .save()
+      .then((result) => {
+        console.log("History saved successfully:", result);
+        res.status(200).json({ result: true });
+      })
+      .catch((error) => {
+        console.error("Error occurs while saving history:", error);
+        res
+          .status(500)
+          .json({ result: false, message: "Database save error", error });
+      });
   } catch (error) {
     console.error("Error processing request:", error);
-    res.status(500).json({ result: false, message: "Internal server error", error });
+    res
+      .status(500)
+      .json({ result: false, message: "Internal server error", error });
   }
 });
 
-
 exports.getWorkoutsHistory = asyncHandler(async (req, res, next) => {
   try {
-    const { monthIndex, weekIndex, dayIndex, day, daySplit, exercises } = req.body;
+    const { monthIndex, weekIndex, dayIndex, day, daySplit, exercises } =
+      req.body;
     const userId = req.user;
-    const user = await User.findOne({id: userId});
+    const user = await User.findOne({ id: userId });
 
     if (!user.workoutsHistory) user.workoutsHistory = new Array();
-    if (!user.workoutsHistory.exercises) user.workoutsHistory.exercises = new Array();
-    if (!user.workoutsHistory.exercises.sets) user.workoutsHistory.exercises.sets = new Array();
+    if (!user.workoutsHistory.exercises)
+      user.workoutsHistory.exercises = new Array();
+    if (!user.workoutsHistory.exercises.sets)
+      user.workoutsHistory.exercises.sets = new Array();
 
     user.workoutsHistory.push({
-      monthIndex : monthIndex,
-      weekIndex : weekIndex,
-      daySplit : daySplit,
-      dayIndex : dayIndex,
-      day : day,
-    })
-    exercises.map(exercise => {
-      user.workoutsHistory.exercises.push(
-        {
+      monthIndex: monthIndex,
+      weekIndex: weekIndex,
+      daySplit: daySplit,
+      dayIndex: dayIndex,
+      day: day,
+    });
+    exercises.map((exercise) => {
+      user.workoutsHistory.exercises.push({
         exerciseId: exercise.exerciseId,
         status: exercise.status,
-        }
-      )
+      });
     });
-    await user.save().then((result) => {
-      console.log("history saved successfully:", result);
-      res.status(200).json({ result: true });
-    }).catch((error) => {
-      console.error("Error occurs while saving history:", error);
-      res.status(200).json({ result: false, message: error });
-    });
+    await user
+      .save()
+      .then((result) => {
+        console.log("history saved successfully:", result);
+        res.status(200).json({ result: true });
+      })
+      .catch((error) => {
+        console.error("Error occurs while saving history:", error);
+        res.status(200).json({ result: false, message: error });
+      });
   } catch (error) {
     console.log(error);
   }
@@ -470,4 +493,3 @@ const getSortInfo = (sortBy) => {
 
   return { [orderBy]: orderDir };
 };
-
